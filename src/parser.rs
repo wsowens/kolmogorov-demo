@@ -12,6 +12,10 @@ pub struct Cli {
 pub enum Command {
     /// Execute a code snippet
     Execute(ExecuteArgs),
+    /// Parse the instructions in a code snippet
+    Debug(ExecuteArgs),
+    /// Step through each instruction of a code snippet
+    Trace(ExecuteArgs),
     /// Generate and test random snippets of code
     Generate(GenerateArgs),
 }

@@ -8,20 +8,28 @@ fn main() {
     let input = Cli::parse();
 
     match &input.command {
+        // Command::Debug
         Command::Execute(args) => {
-            machine8bit::debug_code(args.code);
+            println!("{}", machine8bit::format_code(args.code));
+        }
+        Command::Debug(args) => {
+            println!("{}", machine8bit::format_code(args.code));
+        }
+        Command::Trace(args) => {
+            eprintln!("{}\n", machine8bit::format_code(args.code));
+            machine8bit::trace_code(args.code);
         }
         Command::Generate(args) => {
             let mut count: u64 = 0;
             loop {
                 count += 1;
                 let code: u64 = random();
+                eprintln!("{:x}", code);
                 let result = if args.no_interpret {
                     f64::from_be_bytes(code.to_be_bytes())
                 } else {
                     machine8bit::execute_code(code)
                 };
-
                 let abs_diff = (result - args.goal).abs();
                 if abs_diff < args.epsilon {
                     println!("{}\t0x{:x}\t{:.16}\t{:.16}", count, code, result, abs_diff);
@@ -36,6 +44,53 @@ fn main() {
 }
 
 mod machine8bit {
+    use std::cmp::{Eq, Ord, PartialEq, PartialOrd};
+    use std::collections::HashSet;
+    use std::hash::{Hash, Hasher};
+
+    struct MachineState {
+        regs: [f64; 4],
+        curr: u8,
+        prev: u8,
+        addr: usize,
+        retval: Option<usize>,
+    }
+
+    #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct HashableMachineState {
+        regs: [u64; 4],
+        curr: u8,
+        prev: u8,
+        addr: usize,
+        retval: Option<usize>,
+    }
+
+    impl MachineState {
+        fn init(code: u64) -> ([u8; 8], MachineState) {
+            let bytes = code.to_be_bytes();
+            (
+                bytes,
+                MachineState {
+                    regs: [0.0f64; 4],
+                    curr: bytes[0],
+                    prev: bytes[7], // treat the code as 'circular'
+                    addr: 0,
+                    retval: None,
+                },
+            )
+        }
+
+        fn hashable(&self) -> HashableMachineState {
+            let u64_regs: [u64; 4] = self.regs.map(|x| u64::from_be_bytes(x.to_be_bytes()));
+            HashableMachineState {
+                regs: u64_regs,
+                curr: self.curr,
+                prev: self.prev,
+                addr: self.addr,
+                retval: self.retval,
+            }
+        }
+    }
     /*
 
     Register Operations:
@@ -46,6 +101,10 @@ mod machine8bit {
     Arithmetic Operations
     | _ _ _ | _ | | _ _ | _ _ |
       inst.   op   left   right
+
+    Jump Operations:
+    | _ _ _ | _ _ _ | _ _ |
+      inst.   addr    right
 
 
 
@@ -60,7 +119,7 @@ mod machine8bit {
     0x4 INC (DEC): increment (or decrement) right, store result in left
     0x5 ADD (SUB): addition (subtract) left by right, store result in left
     0x6 MUL (DIV): multiply (divide) left by right, store result in left
-    0x7 EXP (NXP): raise left to (negative) right power, store result in left
+    0x7 JMP (CON): jump if right is not zero
 
     // So one such program to estimate e in a complete fashion:
 
@@ -82,10 +141,35 @@ mod machine8bit {
     // all together now
     // n = (256*3)^2
     // 01010111_11000101_11000101_10001010_01100010_11011001_10100010_11100001
+
+    0101_1111 LOD into r3
+    r1 = r3
+    r1 = r2
+    r1 /= r2
+    1011_1010 r2--
+    JMP
+    1010_0001 r0 += r1
+    1001_1111 DEC R3
+    JMP
+
+    0101_1111 r3 = some dumb high number
+    1000_0000 r0++
+    1000_0101 r1++
+    1000_1010 r2++
+    1101_0110 r1 /= r2
+    1010_0001 r0 += r1
+    1001_1111 r3--
+    1110_1111 jmp 0x3 r3 != 0
+
+    0b01011111_10000000_10000101_10001010_11010110_10100001_10011111_11101111
     */
 
     fn instr(byte: u8) -> u8 {
         (byte & 0xe0) >> 5
+    }
+
+    fn addr(byte: u8) -> usize {
+        ((byte & 0x1c) >> 2) as usize
     }
 
     fn op(byte: u8) -> bool {
@@ -100,95 +184,146 @@ mod machine8bit {
         (byte & 0b0000_0011) as usize
     }
 
-    fn execute_byte(byte: u8, mut regs: [f64; 4], prev_byte: u8) -> ([f64; 4], Option<usize>) {
-        match instr(byte) {
+    fn execute_byte(mut state: MachineState) -> MachineState {
+        // by default, simply go to the next address
+        state.addr += 1;
+
+        match instr(state.curr) {
             0b000 => { /* noop */ }
             0b001 => {
                 /* return */
-                return (regs, Some(r_reg(byte)));
+                state.retval = Some(r_reg(state.curr));
             }
             0b010 => {
                 /* load */
-                let v = byte & 0b11;
-                let dest = &mut regs[l_reg(byte)];
-                if op(byte) {
+                let v = state.curr & 0b11;
+                let dest = &mut state.regs[l_reg(state.curr)];
+                if op(state.curr) {
                     //regs[l] = (r as u32) << 8 +
-                    *dest = (((v as u32) << 8) + (prev_byte as u32)) as f64;
+                    *dest = (((v as u32) << 8) + (state.prev as u32)) as f64;
                 } else {
                     *dest = v as f64;
                 }
             }
             0b011 => {
                 /* move | copy */
-                regs[l_reg(byte)] = regs[r_reg(byte)];
-                if op(byte) {
-                    regs[r_reg(byte)] = 0f64;
+                state.regs[l_reg(state.curr)] = state.regs[r_reg(state.curr)];
+                if op(state.curr) {
+                    state.regs[r_reg(state.curr)] = 0f64;
                 }
             }
             0b100 => {
                 /* inc | dec */
-                let l_reg = l_reg(byte);
-                let r_reg = r_reg(byte);
-                if op(byte) {
-                    regs[l_reg] = regs[r_reg] - 1.0;
+                let l_reg = l_reg(state.curr);
+                let r_reg = r_reg(state.curr);
+                if op(state.curr) {
+                    state.regs[l_reg] = state.regs[r_reg] - 1.0;
                 } else {
-                    regs[l_reg] = regs[r_reg] + 1.0;
+                    state.regs[l_reg] = state.regs[r_reg] + 1.0;
                 }
             }
             0b101 => {
                 /* add | sub */
-                let l_reg = l_reg(byte);
-                let r_reg = r_reg(byte);
-                if op(byte) {
-                    regs[l_reg] -= regs[r_reg];
+                let l_reg = l_reg(state.curr);
+                let r_reg = r_reg(state.curr);
+                if op(state.curr) {
+                    state.regs[l_reg] -= state.regs[r_reg];
                 } else {
-                    regs[l_reg] += regs[r_reg];
+                    state.regs[l_reg] += state.regs[r_reg];
                 }
             }
             0b110 => {
                 /* mul | div */
-                let l_reg = l_reg(byte);
-                let r_reg = r_reg(byte);
-                if op(byte) {
-                    regs[l_reg] /= regs[r_reg];
+                let l_reg = l_reg(state.curr);
+                let r_reg = r_reg(state.curr);
+                if op(state.curr) {
+                    state.regs[l_reg] /= state.regs[r_reg];
                 } else {
-                    regs[l_reg] *= regs[r_reg];
+                    state.regs[l_reg] *= state.regs[r_reg];
                 }
             }
             0b111 => {
-                let l_reg = l_reg(byte);
-                let r_reg = r_reg(byte);
-                if op(byte) {
-                    regs[l_reg] = regs[l_reg].powf(-regs[r_reg]);
-                } else {
-                    regs[l_reg] = regs[l_reg].powf(regs[r_reg]);
+                if state.regs[r_reg(state.curr)] != 0.0 {
+                    state.addr = addr(state.curr);
                 }
             }
             _ => unreachable!(),
         }
-        (regs, None)
+        state
     }
 
     pub fn execute_code(code: u64) -> f64 {
-        let mut regs = [0.0f64; 4];
-        let bytes = code.to_be_bytes();
+        let (bytes, mut state) = MachineState::init(code);
 
-        let mut ret_reg = None;
-        // weird circular trick here
-        let mut prev_byte = bytes[7];
+        let mut jump_log = HashSet::new();
 
-        for byte in bytes {
-            (regs, ret_reg) = execute_byte(byte, regs, prev_byte);
-            if ret_reg.is_some() {
+        let MAX_CYCLES = std::f32::INFINITY;
+        let mut cycles = 0.0;
+        loop {
+            state = execute_byte(state);
+            if let Some(retval) = state.retval {
+                return state.regs[retval];
+            }
+
+            cycles += 1.0;
+            if cycles == MAX_CYCLES {
                 break;
             }
-            prev_byte = byte;
+
+            if state.addr > 0x7 {
+                break;
+            }
+
+            if instr(state.curr) == 0x7 && !jump_log.insert(state.hashable()) {
+                break;
+            }
+
+            // set up for next run
+            state.prev = state.curr;
+            state.curr = bytes[state.addr];
         }
 
-        regs[ret_reg.unwrap_or(0)]
+        state.regs[0]
     }
 
-    fn decode_byte(byte: u8, prev_byte: u8) -> String {
+    pub fn trace_code(code: u64) -> f64 {
+        let (bytes, mut state) = MachineState::init(code);
+
+        let mut jump_log = HashSet::new();
+
+        let MAX_CYCLES = std::f32::INFINITY;
+        let mut cycles = 0.0;
+        loop {
+            eprint!("{} 0x{:x}\t", cycles, state.addr);
+            state = execute_byte(state);
+            eprintln!("{:?}", state.regs);
+
+            if let Some(retval) = state.retval {
+                eprintln!("explicit return reg{} [{}]", retval, state.regs[retval]);
+                return state.regs[retval];
+            }
+
+            if instr(state.curr) == 0x7 && !jump_log.insert(state.hashable()) {
+                eprintln!("infinite loop detected");
+                break;
+            }
+
+            if state.addr > 0x7 {
+                break;
+            }
+
+            cycles += 1.0;
+
+            // set up for next run
+            state.prev = state.curr;
+            state.curr = bytes[state.addr];
+        }
+
+        eprintln!("implicit return reg0 [{}]", state.regs[0]);
+        state.regs[0]
+    }
+
+    fn format_byte(byte: u8, prev_byte: u8) -> String {
         let instr = instr(byte);
         let op = op(byte);
         let l_reg = l_reg(byte);
@@ -236,43 +371,28 @@ mod machine8bit {
                 }
             }
             0b111 => {
-                if op {
-                    format!("NXP r{0} <- r{0} ^-r{1}", l_reg, r_reg)
-                } else {
-                    format!("EXP r{0} <- r{0} ^ r{1}", l_reg, r_reg)
-                }
+                format!("JMP 0x{:x} if r{} != 0", addr(byte), r_reg)
             }
             _ => String::new(),
         }
     }
 
-    pub fn debug_code(code: u64) -> f64 {
-        eprintln!("0b{:0>64b}", code);
-        let mut regs = [0.0f64; 4];
+    pub fn format_code(code: u64) -> String {
         let bytes = code.to_be_bytes();
 
         // weird circular trick here
         let mut prev_byte = bytes[7];
-
-        for byte in bytes {
-            let ret_reg;
-            (regs, ret_reg) = execute_byte(byte, regs, prev_byte);
-            eprintln!(
-                "0x{:0>2x} {: <17} {:?} ",
+        let mut formatted_bytes = Vec::with_capacity(8);
+        for (lineno, byte) in bytes.into_iter().enumerate() {
+            formatted_bytes.push(format!(
+                "0x{:x}\t0x{:0>2x}\t{}",
+                lineno,
                 byte,
-                decode_byte(byte, prev_byte),
-                regs
-            );
-            if let Some(ret_addr) = ret_reg {
-                eprintln!("reg{} [{}]", ret_addr, regs[ret_addr]);
-                return regs[ret_addr];
-            }
+                format_byte(byte, prev_byte)
+            ));
             prev_byte = byte;
         }
-
-        // if nothing was returned, look at register 0
-        eprintln!("reg0 [{}]", regs[0]);
-        regs[0]
+        formatted_bytes.join("\n")
     }
 
     #[cfg(test)]
@@ -343,11 +463,18 @@ mod machine8bit {
         }
 
         #[test]
-        fn test_exp() {
-            // set r0 and r2 to 3, then exponentiate them
-            assert_code_returns(0b0100_0011_0100_1011_1110_0010, 27.0);
-            // set r0 to 8 and r2 to 3, then negative exponentiate them
-            assert_code_returns(0b0100_0010_0100_1011_1111_0010, 0.125);
+        fn test_jmp() {
+            // try to jmp if r1 is not 0, but it is so you return contents of r0 by default
+            assert_code_returns(0b0000_0011_0101_0000_1111_1101_0010_0000_0010_0001, 3.0);
+            // same as above, but successfully jump
+            assert_code_returns(0b1000_0100_0101_0000_1111_1101_0010_0000_0010_0001, 1.0);
+            // sum of numbers 0 to 15
+            // NOP: 0000_1111
+            // LOD 15 into r1: 0101_0100
+            // ADD r0 += r1: 1010_0001
+            // DEC r1: 1001_0101
+            // JMP if r1 != 0: 1111_0101
+            assert_code_returns(0b0000_1111_0101_0100_1010_0001_1001_0101_1111_0101, 120.0);
         }
     }
 }
