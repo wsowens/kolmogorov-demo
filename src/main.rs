@@ -8,45 +8,111 @@ fn main() {
     let input = Cli::parse();
 
     match &input.command {
-        // Command::Debug
         Command::Execute(args) => {
-            println!("{}", machine8bit::format_code(args.code));
+            let params = machine16bit::MachineParams {
+                max_cycles: args.max_cycles,
+                verbose: args.verbose,
+            };
+            let result = machine16bit::execute_code_params(&args.code[..], &params);
+            if args.verbose {
+                println!("{:?}", result)
+            } else {
+                println!("{:?}", result.value())
+            }
         }
-        Command::Debug(args) => {
-            println!("{}", machine8bit::format_code(args.code));
-        }
-        Command::Trace(args) => {
-            eprintln!("{}\n", machine8bit::format_code(args.code));
-            machine8bit::trace_code(args.code);
+        Command::Decompile(args) => {
+            println!("{}", machine16bit::format_code(&args.code[..]));
         }
         Command::Generate(args) => {
-            let mut count: u64 = 0;
-            loop {
-                count += 1;
-                let code: u64 = random();
-                eprintln!("{:x}", code);
-                let result = if args.no_interpret {
-                    f64::from_be_bytes(code.to_be_bytes())
-                } else {
-                    machine8bit::execute_code(code)
-                };
-                let abs_diff = (result - args.goal).abs();
-                if abs_diff < args.epsilon {
-                    println!("{}\t0x{:x}\t{:.16}\t{:.16}", count, code, result, abs_diff);
-                }
-                if abs_diff < args.stop || (args.max.is_some() && args.max.unwrap() == count) {
-                    println!("{}\t0x{:x}\t{:.16}\t{:.16}", count, code, result, abs_diff);
-                    break;
-                }
+            if args.no_code {
+                generate_floats(args);
+            } else {
+                generate_code(args);
             }
         }
     }
 }
 
+fn generate_floats(params: &parser::GenerateArgs) {
+    let mut count = 0;
+    loop {
+        if params.max_tests.map_or(false, |m| m == count) {
+            break;
+        }
+
+        let result: f64 = random();
+
+        match params.goal {
+            Some(goal) => {
+                let abs_diff = (result - goal).abs();
+
+                if abs_diff < params.stop {
+                    println!("{}\t{:.16}\t{:.16}", count, result, abs_diff);
+                    break;
+                }
+                if abs_diff < params.epsilon {
+                    println!("{}\t{:.16}\t{:.16}", count, result, abs_diff);
+                }
+            }
+            None => {
+                println!("{}\t{:.16}", count, result);
+            }
+        }
+        count += 1;
+    }
+}
+
+fn generate_code(params: &parser::GenerateArgs) {
+    let mut count = 0;
+
+    let mut machine_params = machine16bit::MachineParams::default();
+    machine_params.max_cycles = params.max_cycles;
+
+    loop {
+        if params.max_tests.map_or(false, |m| m == count) {
+            break;
+        }
+
+        let code: u128 = random();
+
+        let return_result =
+            machine16bit::execute_code_params(&code.to_be_bytes()[..], &machine_params);
+        let result = return_result.value();
+
+        match params.goal {
+            Some(goal) => {
+                let abs_diff = (result - goal).abs();
+
+                if abs_diff < params.epsilon {
+                    println!(
+                        "{}\t0x{:0>16x}\t{:?}\t{:.16}\t{:.16}",
+                        count, code, return_result, result, abs_diff
+                    );
+                }
+                if abs_diff < params.stop {
+                    println!(
+                        "{}\t0x{:0>16x}\t{:?}\t{:.16}\t{:.16}",
+                        count, code, return_result, result, abs_diff
+                    );
+                    break;
+                }
+            }
+            None => {
+                println!(
+                    "{}\t0x{:0>16x}\t{:?}\t{:.16}",
+                    count, code, return_result, result
+                );
+            }
+        }
+        count += 1;
+    }
+}
+
+mod machine16bit;
 mod machine8bit {
     use std::cmp::{Eq, Ord, PartialEq, PartialOrd};
     use std::collections::HashSet;
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
 
     struct MachineState {
         regs: [f64; 4],
@@ -252,20 +318,21 @@ mod machine8bit {
         state
     }
 
+    const MAX_CYCLES: usize = 1000000;
+
     pub fn execute_code(code: u64) -> f64 {
         let (bytes, mut state) = MachineState::init(code);
 
         let mut jump_log = HashSet::new();
 
-        let MAX_CYCLES = std::f32::INFINITY;
-        let mut cycles = 0.0;
+        let mut cycles = 0;
         loop {
             state = execute_byte(state);
             if let Some(retval) = state.retval {
                 return state.regs[retval];
             }
 
-            cycles += 1.0;
+            cycles += 0;
             if cycles == MAX_CYCLES {
                 break;
             }
@@ -291,8 +358,7 @@ mod machine8bit {
 
         let mut jump_log = HashSet::new();
 
-        let MAX_CYCLES = std::f32::INFINITY;
-        let mut cycles = 0.0;
+        let mut cycles = 0;
         loop {
             eprint!("{} 0x{:x}\t", cycles, state.addr);
             state = execute_byte(state);
@@ -312,7 +378,10 @@ mod machine8bit {
                 break;
             }
 
-            cycles += 1.0;
+            cycles += 1;
+            if cycles == MAX_CYCLES {
+                break;
+            }
 
             // set up for next run
             state.prev = state.curr;
