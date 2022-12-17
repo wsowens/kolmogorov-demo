@@ -42,7 +42,7 @@
 #[derive(Default)]
 pub struct MachineParams {
     pub max_cycles: Option<usize>,
-    pub trace: bool,
+    pub verbose: bool,
 }
 
 #[derive(Default)]
@@ -138,10 +138,14 @@ pub fn format_code(code: &[u8]) -> String {
     let mut pieces = Vec::new();
     let mut line = 0;
     while line < code.len() / 2 {
+        let first = code[line * 2];
+        let second = code[line * 2 + 1];
         pieces.push(format!(
-            "0x{:0>2x}\t{}",
+            "0x{:0>2x}\t0x{:0>2x}{:0>2x}\t{}",
             line,
-            format_bytes(code[line * 2], code[line * 2 + 1])
+            first,
+            second,
+            format_bytes(first, second)
         ));
         line += 1
     }
@@ -232,6 +236,7 @@ pub enum Return {
     Implicit(f64, usize),
     Explicit(f64, usize),
     Timeout(f64, usize),
+    LoopDetected(f64, usize),
 }
 
 impl Return {
@@ -240,6 +245,7 @@ impl Return {
             Return::Implicit(v, _) => *v,
             Return::Explicit(v, _) => *v,
             Return::Timeout(v, _) => *v,
+            Return::LoopDetected(v, _) => *v,
         }
     }
 }
@@ -262,10 +268,11 @@ pub fn execute_code_params(code: &[u8], params: &MachineParams) -> Return {
         if params.max_cycles.is_some() && params.max_cycles.unwrap() == cycles {
             return Return::Timeout(state.retval(), cycles);
         }
-        if params.trace {
+        if params.verbose {
             println!(
-                "{}\t{}\t{:?}",
+                "{}\t0x{:0>2}\t{: <22}\t{:?}",
                 cycles,
+                state.addr,
                 format_bytes(code[state.addr * 2], code[state.addr * 2 + 1]),
                 state.regs
             )
@@ -379,7 +386,7 @@ mod test_machine16bit {
                 &[0xe0, 00],
                 &MachineParams {
                     max_cycles: Some(100),
-                    trace: false
+                    verbose: false
                 }
             ),
             Return::Timeout(0.0, 100)
