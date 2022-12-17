@@ -70,19 +70,6 @@ pub struct GenerateArgs {
     pub no_code: bool,
 }
 
-fn parse_u64(s: &str) -> Result<u64, std::num::ParseIntError> {
-    let s = s.replace("_", "");
-    if s.starts_with("0x") {
-        u64::from_str_radix(&s[2..], 16)
-    } else if s.starts_with("0o") {
-        u64::from_str_radix(&s[2..], 8).into()
-    } else if s.starts_with("0b") {
-        u64::from_str_radix(&s[2..], 2).into()
-    } else {
-        u64::from_str_radix(&s, 10)
-    }
-}
-
 fn parse_goal(s: &str) -> Result<f64, std::num::ParseFloatError> {
     if s.starts_with("pi") {
         Ok(std::f64::consts::PI)
