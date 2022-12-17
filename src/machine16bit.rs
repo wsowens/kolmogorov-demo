@@ -175,7 +175,7 @@ fn execute_instr(mut state: MachineState, code: &[u8]) -> MachineState {
         0x3 => {}
         0x4 => {}
         // ARITHMETIC
-        0x5 => match left & 0xf {
+        0x5 => match left & 0x3 {
             0 => state.regs[dest] = 0.0,
             1 => state.regs[dest] = &state.regs[right] + 1.0,
             2 => state.regs[dest] = &state.regs[right] - 1.0,
