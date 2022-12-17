@@ -40,6 +40,12 @@
 */
 
 #[derive(Default)]
+pub struct MachineParams {
+    pub max_cycles: Option<usize>,
+    pub trace: bool,
+}
+
+#[derive(Default)]
 struct MachineState {
     regs: [f64; 16],
     addr: usize,
@@ -55,6 +61,10 @@ impl MachineState {
             self.addr,
             self.flag,
         )
+    }
+
+    fn retval(&self) -> f64 {
+        self.regs[self.flag]
     }
 }
 
@@ -219,31 +229,51 @@ fn execute_instr(mut state: MachineState, code: &[u8]) -> MachineState {
 
 #[derive(PartialEq, Debug)]
 pub enum Return {
-    Implicit(f64),
-    Explicit(f64),
+    Implicit(f64, usize),
+    Explicit(f64, usize),
+    Timeout(f64, usize),
 }
 
 impl Return {
     pub fn value(&self) -> f64 {
         match self {
-            Return::Implicit(v) => *v,
-            Return::Explicit(v) => *v,
+            Return::Implicit(v, _) => *v,
+            Return::Explicit(v, _) => *v,
+            Return::Timeout(v, _) => *v,
         }
     }
 }
 
 pub fn execute_code(code: &[u8]) -> Return {
+    execute_code_params(code, &MachineParams::default())
+}
+
+pub fn execute_code_params(code: &[u8], params: &MachineParams) -> Return {
     let mut state = MachineState::default();
 
+    let mut cycles = 0;
     loop {
         if state.to_return {
-            return Return::Explicit(state.regs[state.flag]);
+            return Return::Explicit(state.retval(), cycles);
         }
         if state.addr * 2 >= code.len() {
-            return Return::Implicit(state.regs[state.flag]);
+            return Return::Implicit(state.retval(), cycles);
+        }
+        if params.max_cycles.is_some() && params.max_cycles.unwrap() == cycles {
+            return Return::Timeout(state.retval(), cycles);
+        }
+        if params.trace {
+            println!(
+                "{}\t{}\t{:?}",
+                cycles,
+                format_bytes(code[state.addr * 2], code[state.addr * 2 + 1]),
+                state.regs
+            )
         }
 
         state = execute_instr(state, code);
+
+        cycles += 1;
     }
 }
 
@@ -328,22 +358,32 @@ mod test_machine16bit {
     #[test]
     fn test_flag_ret() {
         // flag r1, r1 = 2
-        assert_code_returns!(0xf100_5111_5111_u128, Return::Implicit(2.0));
+        assert_code_returns!(0xf100_5111_5111_u128, Return::Implicit(2.0, 8));
         // r1 = 2, flag r1
-        assert_code_returns!(0x5111_5111_f100_u128, Return::Implicit(2.0));
+        assert_code_returns!(0x5111_5111_f100_u128, Return::Implicit(2.0, 8));
         // r1 = 2, ret r1
-        assert_code_returns!(0x5111_5111_f110_u128, Return::Explicit(2.0));
+        assert_code_returns!(0x5111_5111_f110_u128, Return::Explicit(2.0, 8));
         // ret r1, r1 = 2
-        assert_code_returns!(0xf110_5111_5111_u128, Return::Explicit(0.0));
+        assert_code_returns!(0xf110_5111_5111_u128, Return::Explicit(0.0, 6));
     }
 
     #[test]
     fn test_jmp() {
         // jumping to skip an addition
-        assert_code_returns!(0x5010_e700_5010_5010_u128, Return::Implicit(2.0));
+        assert_code_returns!(0x5010_e700_5010_5010_u128, Return::Implicit(2.0, 7));
         // jumping out of bounds from a small byte slice should simply trigger implicit return
-        assert_code_returns!(0x5010_ef00_5010_u64, Return::Implicit(1.0));
-        // TODO: test an infinite loop with some sort of max on the machine
+        assert_code_returns!(0x5010_ef00_5010_u64, Return::Implicit(1.0, 3));
+        // test an infinite loop with some sort of max on the machine
+        assert_eq!(
+            execute_code_params(
+                &[0xe0, 00],
+                &MachineParams {
+                    max_cycles: Some(100),
+                    trace: false
+                }
+            ),
+            Return::Timeout(0.0, 100)
+        );
     }
 
     #[test]
