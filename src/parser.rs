@@ -30,6 +30,10 @@ pub struct ExecuteArgs {
     #[arg(short, long)]
     pub max_cycles: Option<usize>,
 
+    /// Detect (and abort) infinitely looping code snippets.
+    #[arg(long)]
+    pub detect_loops: bool,
+
     /// If enabled, print a full step-by-step trace of each program.
     #[arg(short, long)]
     pub verbose: bool,
@@ -48,6 +52,10 @@ pub struct GenerateArgs {
     /// Maximum number of cycles allowed per code snippet.
     #[arg(short, long)]
     pub max_cycles: Option<usize>,
+
+    /// Detect (and abort) infinitely looping code snippets.
+    #[arg(long)]
+    pub detect_loops: bool,
 
     /// If enabled, search for snippets close to some goal.
     #[arg(short, long, value_parser = parse_goal)]

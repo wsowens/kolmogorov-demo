@@ -13,6 +13,7 @@ fn main() {
             let params = machine16bit::MachineParams {
                 max_cycles: args.max_cycles,
                 verbose: args.verbose,
+                detect_loops: args.detect_loops,
             };
             let result = machine16bit::execute_code_params(&args.code[..], &params);
             if args.verbose {
@@ -68,6 +69,7 @@ fn generate_code(params: &parser::GenerateArgs) {
 
     let mut machine_params = machine16bit::MachineParams::default();
     machine_params.max_cycles = params.max_cycles;
+    machine_params.detect_loops = params.detect_loops;
 
     loop {
         if params.max_tests.map_or(false, |m| m == count) {

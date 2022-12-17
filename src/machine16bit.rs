@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::hash::Hash;
 /*
     All instructions are divided like so:
     | _ _ _ _ | _ _ _ _ | _ _ _ _ | _ _ _ _ |
@@ -39,10 +41,11 @@
 
 */
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct MachineParams {
     pub max_cycles: Option<usize>,
     pub verbose: bool,
+    pub detect_loops: bool,
 }
 
 #[derive(Default)]
@@ -52,6 +55,8 @@ struct MachineState {
     flag: usize,
     to_return: bool,
 }
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct HashableMachineState([u64; 16], usize, usize);
 
 impl MachineState {
@@ -66,6 +71,10 @@ impl MachineState {
     fn retval(&self) -> f64 {
         self.regs[self.flag]
     }
+
+    fn get_instr(&self, code: &[u8]) -> (u8, u8) {
+        (code[self.addr * 2], code[self.addr * 2 + 1])
+    }
 }
 
 fn extract_instr(first_byte: u8, second_byte: u8) -> (usize, usize, usize, usize) {
@@ -75,6 +84,10 @@ fn extract_instr(first_byte: u8, second_byte: u8) -> (usize, usize, usize, usize
         ((second_byte >> 4) & 0xf) as usize,
         (second_byte & 0xf) as usize,
     )
+}
+
+fn is_jump(byte: u8) -> bool {
+    return byte > 0xbf && byte < 0xf0;
 }
 
 const OPNAMES: [&'static str; 16] = [
@@ -153,7 +166,9 @@ pub fn format_code(code: &[u8]) -> String {
 }
 
 fn execute_instr(mut state: MachineState, code: &[u8]) -> MachineState {
-    let (opcode, dest, left, right) = extract_instr(code[state.addr * 2], code[state.addr * 2 + 1]);
+    let instr = state.get_instr(code);
+    let (opcode, dest, left, right) = extract_instr(instr.0, instr.1);
+
     state.addr += 1;
     match opcode {
         // NOP
@@ -250,12 +265,18 @@ impl Return {
     }
 }
 
+#[allow(dead_code)]
 pub fn execute_code(code: &[u8]) -> Return {
     execute_code_params(code, &MachineParams::default())
 }
 
 pub fn execute_code_params(code: &[u8], params: &MachineParams) -> Return {
     let mut state = MachineState::default();
+    let mut jump_log = if params.detect_loops {
+        Some(HashSet::new())
+    } else {
+        None
+    };
 
     let mut cycles = 0;
     loop {
@@ -268,12 +289,20 @@ pub fn execute_code_params(code: &[u8], params: &MachineParams) -> Return {
         if params.max_cycles.is_some() && params.max_cycles.unwrap() == cycles {
             return Return::Timeout(state.retval(), cycles);
         }
+        let instr = state.get_instr(code);
+        if is_jump(instr.0)
+            && jump_log
+                .as_mut()
+                .map_or(false, |set| !set.insert(state.hashable()))
+        {
+            return Return::LoopDetected(state.retval(), cycles);
+        }
         if params.verbose {
             println!(
                 "{}\t0x{:0>2}\t{: <22}\t{:?}",
                 cycles,
                 state.addr,
-                format_bytes(code[state.addr * 2], code[state.addr * 2 + 1]),
+                format_bytes(instr.0, instr.1),
                 state.regs
             )
         }
@@ -386,7 +415,8 @@ mod test_machine16bit {
                 &[0xe0, 00],
                 &MachineParams {
                     max_cycles: Some(100),
-                    verbose: false
+                    verbose: false,
+                    detect_loops: false
                 }
             ),
             Return::Timeout(0.0, 100)
@@ -406,5 +436,23 @@ mod test_machine16bit {
         assert_code_result!(0x2011_u32, 17.0);
         // it's two's complement so...
         assert_code_result!(0x20ff_u32, -1.0);
+    }
+
+    #[test]
+    fn test_loop_detect() {
+        let mut params = MachineParams::default();
+        params.max_cycles = Some(10);
+        // simple infinite loop
+        let code = [0xe0, 0x00];
+        assert_eq!(
+            execute_code_params(&code[..], &params),
+            Return::Timeout(0.0, 10)
+        );
+        // now with loop detection
+        params.detect_loops = true;
+        assert_eq!(
+            execute_code_params(&code[..], &params),
+            Return::LoopDetected(0.0, 1)
+        );
     }
 }
